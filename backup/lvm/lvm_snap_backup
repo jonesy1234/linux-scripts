@@ -1,0 +1,69 @@
+#!/bin/bash
+
+create_snap_all_lv()
+{
+echo "Creating snap of all sysvg lvs"
+for lv in `lvdisplay /dev/xlsysvg | grep -v swap | grep 'LV Name' | awk '{print $3}'`
+do
+	LV_SIZE="`lvs --units m --noheadings --nosuffix $lv | cut -d' ' -f7 | cut -d. -f 1`"		# LV size in MB
+	LV_UUID="`lvdisplay $lv | grep 'LV UUID' | awk -F'LV UUID' '{print $2}' | sed 's/^ *//g'`"	# LV UUID
+	LV_SNAPNAME="SNAP_`basename $lv`"								# LV snapshot name
+
+	echo ""
+	echo "LVM Logical Volume: $lv"
+	echo "Size: $LV_SIZE MB"
+	echo "UUID: $LV_UUID"
+	echo "Snapshot name: $LV_SNAPNAME"
+	echo ""
+	echo "Creating snapshot..."
+	lvcreate -L+250MB --snapshot -n"$LV_SNAPNAME" "$lv"
+done
+}
+
+delete_snap_all_lv()
+{
+echo "Deleting snap of all sysvg lvs"
+for lv in `lvdisplay /dev/xlsysvg | grep 'LV Name' | grep SNAP | awk '{print $3}'`
+do
+        echo "Snapshot name: $lv"
+        echo ""
+        echo "Removing old snapshot (if any)..."
+        lvremove -f "$lv"
+done
+}
+
+mount_all_snap_lv()
+{
+echo "Mounting snap volumes"
+	mount /dev/mapper/xlsysvg-SNAP_root /mnt
+	for lv in `lvdisplay /dev/xlsysvg | grep 'LV Name' | grep SNAP | grep -v root |  awk '{print $3}'`
+	do
+	   MOUNT_POINT=`echo $lv | awk -F_ '{print $2}'`
+	   mount $lv /mnt/$MOUNT_POINT
+	done
+}
+
+umount_all_snap_lv()
+{
+echo "Un-Mounting snap volumes"
+        for lv in `lvdisplay /dev/xlsysvg | grep 'LV Name' | grep SNAP | grep -v root |  awk '{print $3}'`
+        do
+           MOUNT_POINT=`echo $lv | awk -F_ '{print $2}'`
+           umount $lv /mnt/$MOUNT_POINT
+        done
+        umount /dev/mapper/xlsysvg-SNAP_root /mnt
+}
+
+create_tar_all_snap_lv()
+{
+echo "Creating tar"
+cd /mnt && tar -c . -P --preserve --xattrs --totals -b32 | pigz > /export/home/jonesst/mksysb/mksysb.tar
+cd
+}
+
+
+create_snap_all_lv
+mount_all_snap_lv
+create_tar_all_snap_lv
+umount_all_snap_lv
+delete_snap_all_lv
