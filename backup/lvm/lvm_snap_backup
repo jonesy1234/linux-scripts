@@ -1,69 +1,179 @@
 #!/bin/bash
 
+LOCK_FILE="/var/lock/lvm_snap_backup"
+BOOT_FS=""
+ROOT_LV=""
+ROOT_VG=""
+
+gen_lock_file()
+{
+#----------------------------------------------------------------------
+# Create a lock file to prevent multiple runs
+#
+	if [[ -f $LOCK_FILE ]] ; then
+	   echo "Lock file $LOCK_FILE exists, exiting"
+	   exit 1
+        else
+	   touch $LOCK_FILE
+        fi
+}
+
+rm_lock_file()
+{
+#----------------------------------------------------------------------
+# Remove lock file 
+#
+        if [[ -f $LOCK_FILE ]] ; then
+           echo "Removing lock file $LOCK_FILE"
+	   rm -f $LOCK_FILE
+        fi
+}
+
+get_boot_name()
+{
+#----------------------------------------------------------------------
+# Searches for device boot is mounted on
+# Sets the BOOT_FS var
+#
+        echo "Determining boot device"
+        BOOT_FS=`df -lP | egrep "/boot$" | awk '{print $1}'`
+        # Check if the lv var is valid
+        if [[ -n $BOOT_FS ]] ; then
+           echo "Target boot device is $BOOT_FS"
+        else
+           echo "Unable to determine target boot device, exiting..."
+           exit 1
+        fi
+}
+
+get_rootvg_name()
+{
+#----------------------------------------------------------------------
+# Searches for logical volume mounted on /
+# Sets the ROOT_VG var
+#
+        echo "Determining root volume group name"
+	ROOT_LV=`df -lP | egrep "/$" | awk '{print $1}'`
+	# Check if the lv var is valid
+	if [[ `lvdisplay $ROOT_LV | grep -c UUID` -ne 0 ]] ; then
+	   ROOT_VG=`lvdisplay $ROOT_LV | awk '/VG Name/ {print $3}'`
+	   if [[ -n $ROOT_VG ]] ; then
+	      echo "Target volumegroup is $ROOT_VG"
+	   else
+	      echo "Unable to determine target volume group, exiting..."
+	      exit 1
+           fi
+	else
+	   echo "Unable to determine target volume group, exiting..."
+	   exit 1
+	fi
+}
+
+chk_vg_free_space()
+#----------------------------------------------------------------------
+# Counts up the number of logical volumes
+# Determines the snapshot space needed
+# Exits if not enough space available
+#
+{
+	echo "Checking if the Volume group has enough free space"
+	COUNT_LVS=`vgdisplay -c xlsysvg | awk -F: '{$6 = $6 - 1; print $6}'`
+	SPACE_FREE=`vgdisplay -c xlsysvg | awk -F: '{$var = $13 * $16; print $13,$16,$var}'`
+	SPACE_REQUIRED=`eval echo $(( ${COUNT_LVS} * 256))`
+	if [[ $SPACE_FREE -gt $SPACE_REQUIRED ]] ; then
+	   echo "Free space check OK"
+	else
+	   echo "Not enough free space in VG, exiting..."
+	   exit 1
+	fi
+}
+
 create_snap_all_lv()
 {
-echo "Creating snap of all sysvg lvs"
-for lv in `lvdisplay /dev/xlsysvg | grep -v swap | grep 'LV Name' | awk '{print $3}'`
-do
-	LV_SIZE="`lvs --units m --noheadings --nosuffix $lv | cut -d' ' -f7 | cut -d. -f 1`"		# LV size in MB
-	LV_UUID="`lvdisplay $lv | grep 'LV UUID' | awk -F'LV UUID' '{print $2}' | sed 's/^ *//g'`"	# LV UUID
-	LV_SNAPNAME="SNAP_`basename $lv`"								# LV snapshot name
+#----------------------------------------------------------------------
+# Creates snapshot lvs with a size of 250MB
+# for all logical volumes in rootvg excluding swap
+# 
+	echo "Creating snap of all sysvg lvs"
+	for LV in `lvdisplay -c $ROOT_VG | grep -v swap | awk -F: '{print $1}'` ; do
+	   LV_SIZE="`lvs --units m --noheadings --nosuffix $LV | awk '{print $4"MB"}'`"	
+	   LV_SNAPNAME="SNAP_`basename $LV`"
 
-	echo ""
-	echo "LVM Logical Volume: $lv"
-	echo "Size: $LV_SIZE MB"
-	echo "UUID: $LV_UUID"
-	echo "Snapshot name: $LV_SNAPNAME"
-	echo ""
-	echo "Creating snapshot..."
-	lvcreate -L+250MB --snapshot -n"$LV_SNAPNAME" "$lv"
-done
+	   echo ""
+	   echo "LVM Logical Volume: $LV"
+	   echo "Size: $LV_SIZE MB"
+	   echo "Snapshot name: $LV_SNAPNAME"
+	   echo ""
+	   echo "Creating snapshot..."
+	   lvcreate -L+252MB --snapshot -n"$LV_SNAPNAME" "$LV"
+	done
 }
 
 delete_snap_all_lv()
 {
-echo "Deleting snap of all sysvg lvs"
-for lv in `lvdisplay /dev/xlsysvg | grep 'LV Name' | grep SNAP | awk '{print $3}'`
-do
-        echo "Snapshot name: $lv"
-        echo ""
-        echo "Removing old snapshot (if any)..."
-        lvremove -f "$lv"
-done
+#----------------------------------------------------------------------
+# Delete all snapshot lvs with a name of SNAP
+# 
+	echo "Deleting snap of all sysvg lvs"
+	for LV in `lvdisplay -c $ROOT_VG | awk -F: '/SNAP/ {print $1}'` ; do
+           echo "Removing Snapshot name: $lv"
+           echo ""
+           lvremove -f "$LV"
+	done
 }
 
 mount_all_snap_lv()
 {
-echo "Mounting snap volumes"
-	mount /dev/mapper/xlsysvg-SNAP_root /mnt
-	for lv in `lvdisplay /dev/xlsysvg | grep 'LV Name' | grep SNAP | grep -v root |  awk '{print $3}'`
-	do
-	   MOUNT_POINT=`echo $lv | awk -F_ '{print $2}'`
-	   mount $lv /mnt/$MOUNT_POINT
+#----------------------------------------------------------------------
+# Mount all snapshot volumes 
+# 
+	echo "Mounting snap volumes"
+	ROOT_LV_SHORT="`basename $ROOT_LV | sed 's/-/\//g'`"
+	ROOT_LV_SNAP="`lvdisplay -c | grep $ROOT_LV_SHORT | awk -F/ '{print $4}' | awk -F: '{print "SNAP_"$1}'`"
+	mount /dev/mapper/$ROOT_VG-$ROOT_LV_SNAP /mnt
+	mount $BOOT_FS /mnt/boot
+	for LV in `lvdisplay -c $ROOT_VG | grep -v root |  awk -F: '/SNAP/ {print $1}'`; do
+	   MOUNT_POINT=`echo $LV | awk -F_ '{print $2}'`
+	   mount $LV /mnt/$MOUNT_POINT
 	done
 }
 
 umount_all_snap_lv()
 {
-echo "Un-Mounting snap volumes"
-        for lv in `lvdisplay /dev/xlsysvg | grep 'LV Name' | grep SNAP | grep -v root |  awk '{print $3}'`
-        do
-           MOUNT_POINT=`echo $lv | awk -F_ '{print $2}'`
-           umount $lv /mnt/$MOUNT_POINT
+#----------------------------------------------------------------------
+# Mount all snapshot volumes 
+# 
+	echo "Un-Mounting snap volumes"
+        for LV in `lvdisplay -c $ROOT_VG | grep -v root |  awk -F: '/SNAP/ {print $1}'`; do
+           MOUNT_POINT=`echo $LV | awk -F_ '{print $2}'`
+           umount $LV /mnt/$MOUNT_POINT
         done
-        umount /dev/mapper/xlsysvg-SNAP_root /mnt
+	umount /mnt/boot
+        umount /mnt
 }
 
 create_tar_all_snap_lv()
+#----------------------------------------------------------------------
+# Create a single tar of all snapshot volumes 
+# 
 {
-echo "Creating tar"
-cd /mnt && tar -c . -P --preserve --xattrs --totals -b32 | pigz > /export/home/jonesst/mksysb/mksysb.tar
-cd
+	echo "Creating tar"
+	cd /mnt && tar -c . -P --preserve --xattrs --totals -b32 | pigz -p 4  > /export/home/jonesst/mksysb/mksysb.tar
+	cd
 }
 
 
+#--------------------------------------------------------------------------
+# Main Section
+#--------------------------------------------------------------------------
+
+gen_lock_file
+get_boot_name
+get_rootvg_name
+chk_vg_free_space
 create_snap_all_lv
 mount_all_snap_lv
 create_tar_all_snap_lv
 umount_all_snap_lv
 delete_snap_all_lv
+rm_lock_file
