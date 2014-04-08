@@ -146,7 +146,7 @@ delete_snap_all_lv()
 # 
 	((verbose)) && echo "Deleting snap of all sysvg lvs"
 	for LV in `lvdisplay -c $ROOT_VG | awk -F: '/SNAP/ {print $1}'` ; do
-           ((verbose)) && echo "Removing Snapshot name: $lv"
+           ((verbose)) && echo "Removing Snapshot name: $LV"
            ((verbose)) && echo ""
            lvremove -f "$LV" 2>&1 >/dev/null
            if [[ $? -ne 0 ]] ; then
@@ -192,9 +192,9 @@ create_tar_all_snap_lv()
 # 
 {
 	((verbose)) && echo "Creating tar"
-	cd /mnt && tar -c . -P --preserve --xattrs --totals -b32 | pigz -p 4  > $OUTPUT_LOCATION/$HOSTNAME.$DATE.tar.gz  2>&1 >/dev/null
+	cd /mnt && tar -c . -P --preserve --xattrs --totals -b32 |  pv -s $(du -sb . | awk '{print $1}') | pigz -p 4  > $OUTPUT_LOCATION/$HOSTNAME.$DATE.tar.gz 
 	if [[ $? -ne 0 ]] ; then
-           echo "An error occured creating tar of $LV"
+           echo "An error occured creating tar"
            exit 1
         fi
 	cd
