@@ -1,9 +1,28 @@
 #!/bin/bash
 
 LOCK_FILE="/var/lock/lvm_snap_backup"
+DATE=`date +"%H%M%d%m%y"`
+HOSTNAME=`hostname -s`
 BOOT_FS=""
 ROOT_LV=""
 ROOT_VG=""
+
+usage()
+{
+#----------------------------------------------------------------------
+# Usage
+#
+	echo -e "\n"
+   	echo "Usage: $0 -f {location} -v"
+   	echo ""
+	echo "Flags"
+	echo "     -f {location} Location where to write the output hostname-mksysb.tar.gz "
+	echo "     -v verbose"
+	echo ""
+	exit 1
+
+}
+
 
 gen_lock_file()
 {
@@ -24,7 +43,7 @@ rm_lock_file()
 # Remove lock file 
 #
         if [[ -f $LOCK_FILE ]] ; then
-           echo "Removing lock file $LOCK_FILE"
+           ((verbose)) && echo "Removing lock file $LOCK_FILE"
 	   rm -f $LOCK_FILE
         fi
 }
@@ -35,11 +54,11 @@ get_boot_name()
 # Searches for device boot is mounted on
 # Sets the BOOT_FS var
 #
-        echo "Determining boot device"
+        ((verbose)) && echo "Determining boot device"
         BOOT_FS=`df -lP | egrep "/boot$" | awk '{print $1}'`
         # Check if the lv var is valid
         if [[ -n $BOOT_FS ]] ; then
-           echo "Target boot device is $BOOT_FS"
+           ((verbose)) && echo "Target boot device is $BOOT_FS"
         else
            echo "Unable to determine target boot device, exiting..."
            exit 1
@@ -52,19 +71,26 @@ get_rootvg_name()
 # Searches for logical volume mounted on /
 # Sets the ROOT_VG var
 #
-        echo "Determining root volume group name"
+        ((verbose)) && echo "Determining root volume group name"
+	if [[ `vgdisplay | wc -l` -eq 0 ]] ; then
+	   echo "Host is not using LVM, exiting..."
+	   rm_lock_file
+           exit 1
+	fi
 	ROOT_LV=`df -lP | egrep "/$" | awk '{print $1}'`
 	# Check if the lv var is valid
 	if [[ `lvdisplay $ROOT_LV | grep -c UUID` -ne 0 ]] ; then
 	   ROOT_VG=`lvdisplay $ROOT_LV | awk '/VG Name/ {print $3}'`
 	   if [[ -n $ROOT_VG ]] ; then
-	      echo "Target volumegroup is $ROOT_VG"
+	      ((verbose)) && echo "Target volumegroup is $ROOT_VG"
 	   else
 	      echo "Unable to determine target volume group, exiting..."
+	      rm_lock_file
 	      exit 1
            fi
 	else
 	   echo "Unable to determine target volume group, exiting..."
+	   rm_lock_file
 	   exit 1
 	fi
 }
@@ -76,12 +102,12 @@ chk_vg_free_space()
 # Exits if not enough space available
 #
 {
-	echo "Checking if the Volume group has enough free space"
+	((verbose)) && echo "Checking if the Volume group has enough free space"
 	COUNT_LVS=`vgdisplay -c xlsysvg | awk -F: '{$6 = $6 - 1; print $6}'`
 	SPACE_FREE=`vgdisplay -c xlsysvg | awk -F: '{$var = $13 * $16; print $13,$16,$var}'`
 	SPACE_REQUIRED=`eval echo $(( ${COUNT_LVS} * 256))`
 	if [[ $SPACE_FREE -gt $SPACE_REQUIRED ]] ; then
-	   echo "Free space check OK"
+	   ((verbose)) && echo "Free space check OK"
 	else
 	   echo "Not enough free space in VG, exiting..."
 	   exit 1
@@ -94,18 +120,22 @@ create_snap_all_lv()
 # Creates snapshot lvs with a size of 250MB
 # for all logical volumes in rootvg excluding swap
 # 
-	echo "Creating snap of all sysvg lvs"
+	((verbose)) && echo "Creating snap of all sysvg lvs"
 	for LV in `lvdisplay -c $ROOT_VG | grep -v swap | awk -F: '{print $1}'` ; do
 	   LV_SIZE="`lvs --units m --noheadings --nosuffix $LV | awk '{print $4"MB"}'`"	
 	   LV_SNAPNAME="SNAP_`basename $LV`"
 
-	   echo ""
-	   echo "LVM Logical Volume: $LV"
-	   echo "Size: $LV_SIZE MB"
-	   echo "Snapshot name: $LV_SNAPNAME"
-	   echo ""
-	   echo "Creating snapshot..."
-	   lvcreate -L+252MB --snapshot -n"$LV_SNAPNAME" "$LV"
+	   ((verbose)) && echo ""
+	   ((verbose)) && echo "LVM Logical Volume: $LV"
+	   ((verbose)) && echo "Size: $LV_SIZE MB"
+	   ((verbose)) && echo "Snapshot name: $LV_SNAPNAME"
+	   ((verbose)) && echo ""
+	   ((verbose)) && echo "Creating snapshot..."
+	   lvcreate -L+252MB --snapshot -n"$LV_SNAPNAME" "$LV" 2>&1 >/dev/null
+	   if [[ $? -ne 0 ]] ; then
+	      echo "An error occured taking snapshot of $LV"
+	      exit 1
+	   fi
 	done
 }
 
@@ -114,11 +144,15 @@ delete_snap_all_lv()
 #----------------------------------------------------------------------
 # Delete all snapshot lvs with a name of SNAP
 # 
-	echo "Deleting snap of all sysvg lvs"
+	((verbose)) && echo "Deleting snap of all sysvg lvs"
 	for LV in `lvdisplay -c $ROOT_VG | awk -F: '/SNAP/ {print $1}'` ; do
-           echo "Removing Snapshot name: $lv"
-           echo ""
-           lvremove -f "$LV"
+           ((verbose)) && echo "Removing Snapshot name: $lv"
+           ((verbose)) && echo ""
+           lvremove -f "$LV" 2>&1 >/dev/null
+           if [[ $? -ne 0 ]] ; then
+              echo "An error occured taking snapshot of $LV"
+              exit 1
+           fi
 	done
 }
 
@@ -127,7 +161,7 @@ mount_all_snap_lv()
 #----------------------------------------------------------------------
 # Mount all snapshot volumes 
 # 
-	echo "Mounting snap volumes"
+	((verbose)) && echo "Mounting snap volumes"
 	ROOT_LV_SHORT="`basename $ROOT_LV | sed 's/-/\//g'`"
 	ROOT_LV_SNAP="`lvdisplay -c | grep $ROOT_LV_SHORT | awk -F/ '{print $4}' | awk -F: '{print "SNAP_"$1}'`"
 	mount /dev/mapper/$ROOT_VG-$ROOT_LV_SNAP /mnt
@@ -143,10 +177,10 @@ umount_all_snap_lv()
 #----------------------------------------------------------------------
 # Mount all snapshot volumes 
 # 
-	echo "Un-Mounting snap volumes"
+	((verbose)) && echo "Un-Mounting snap volumes"
         for LV in `lvdisplay -c $ROOT_VG | grep -v root |  awk -F: '/SNAP/ {print $1}'`; do
            MOUNT_POINT=`echo $LV | awk -F_ '{print $2}'`
-           umount $LV /mnt/$MOUNT_POINT
+           umount /mnt/$MOUNT_POINT
         done
 	umount /mnt/boot
         umount /mnt
@@ -157,8 +191,12 @@ create_tar_all_snap_lv()
 # Create a single tar of all snapshot volumes 
 # 
 {
-	echo "Creating tar"
-	cd /mnt && tar -c . -P --preserve --xattrs --totals -b32 | pigz -p 4  > /export/home/jonesst/mksysb/mksysb.tar
+	((verbose)) && echo "Creating tar"
+	cd /mnt && tar -c . -P --preserve --xattrs --totals -b32 | pigz -p 4  > $OUTPUT_LOCATION/$HOSTNAME.$DATE.tar.gz  2>&1 >/dev/null
+	if [[ $? -ne 0 ]] ; then
+           echo "An error occured creating tar of $LV"
+           exit 1
+        fi
 	cd
 }
 
@@ -166,6 +204,20 @@ create_tar_all_snap_lv()
 #--------------------------------------------------------------------------
 # Main Section
 #--------------------------------------------------------------------------
+
+while getopts "f:v" flag ; do
+      case $flag in
+           f) OUTPUT_LOCATION=$OPTARG ;; 
+           v) verbose=1 ;;
+           *) usage ;;
+      esac
+done
+
+if [ -z $OUTPUT_LOCATION  ]; then
+  echo ""
+  echo "-f [option] is required"
+  usage
+fi
 
 gen_lock_file
 get_boot_name
