@@ -23,7 +23,6 @@ usage()
 
 }
 
-
 gen_lock_file()
 {
 #----------------------------------------------------------------------
@@ -190,9 +189,14 @@ create_tar_all_snap_lv()
 #----------------------------------------------------------------------
 # Create a single tar of all snapshot volumes 
 # 
+# If pigz & pv are available use them!
 {
 	((verbose)) && echo "Creating tar"
-	cd /mnt && tar -c . -P --preserve --xattrs --totals -b32 |  pv -s $(du -sb . | awk '{print $1}') | pigz -p 4  > $OUTPUT_LOCATION/$HOSTNAME.$DATE.tar.gz 
+	if [[ `rpm -ql | grep -ec "pigz-" -e "pv-"` -gt 2 ]] ; then
+	   cd /mnt && tar -c . -P --preserve --xattrs --totals -b32 |  pv -s $(du -sb . | awk '{print $1}') | pigz -p 4  > $OUTPUT_LOCATION/$HOSTNAME.$DATE.tar.gz 
+	else
+	   cd /mnt && tar -zc . -P --preserve --xattrs --totals -b32 > $OUTPUT_LOCATION/$HOSTNAME.$DATE.tar.gz 
+	fi
 	if [[ $? -ne 0 ]] ; then
            echo "An error occured creating tar"
            exit 1
